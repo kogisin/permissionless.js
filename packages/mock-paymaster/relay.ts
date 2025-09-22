@@ -1,6 +1,7 @@
 import * as util from "node:util"
 import type { FastifyReply, FastifyRequest } from "fastify"
 import {
+    http,
     type Account,
     type Address,
     BaseError,
@@ -15,6 +16,7 @@ import {
 import {
     type BundlerClient,
     type UserOperation,
+    createBundlerClient,
     entryPoint06Address,
     entryPoint07Address,
     entryPoint08Address
@@ -40,6 +42,8 @@ import {
 } from "./helpers/schema.js"
 import {
     type PaymasterMode,
+    getChain,
+    getPublicClient,
     isTokenSupported,
     maxBigInt
 } from "./helpers/utils.js"
@@ -69,11 +73,12 @@ const handlePmSponsor = async ({
 }) => {
     const is06 = entryPoint === entryPoint06Address
 
-    let op = {
+    let sponsoredUserOp = {
         ...userOperation,
         ...getDummyPaymasterData({ is06, paymaster, paymasterMode })
     } as UserOperation
 
+    // User provided gasLimits
     const callGasLimit = userOperation.callGasLimit
     const verificationGasLimit = userOperation.verificationGasLimit
     const preVerificationGas = userOperation.preVerificationGas
@@ -81,22 +86,25 @@ const handlePmSponsor = async ({
     if (estimateGas) {
         try {
             const gasEstimates = await bundler.estimateUserOperationGas({
-                ...op,
+                ...sponsoredUserOp,
                 entryPointAddress: entryPoint
             })
 
-            op = {
-                ...op,
+            sponsoredUserOp = {
+                ...sponsoredUserOp,
                 ...gasEstimates
             } as UserOperation
 
-            op.callGasLimit = maxBigInt(op.callGasLimit, callGasLimit)
-            op.preVerificationGas = maxBigInt(
-                op.preVerificationGas,
+            sponsoredUserOp.callGasLimit = maxBigInt(
+                gasEstimates.callGasLimit,
+                callGasLimit
+            )
+            sponsoredUserOp.preVerificationGas = maxBigInt(
+                gasEstimates.preVerificationGas,
                 preVerificationGas
             )
-            op.verificationGasLimit = maxBigInt(
-                op.verificationGasLimit,
+            sponsoredUserOp.verificationGasLimit = maxBigInt(
+                gasEstimates.verificationGasLimit,
                 verificationGasLimit
             )
         } catch (e: unknown) {
@@ -116,17 +124,19 @@ const handlePmSponsor = async ({
     }
 
     const result = {
-        preVerificationGas: toHex(op.preVerificationGas),
-        callGasLimit: toHex(op.callGasLimit),
+        preVerificationGas: toHex(sponsoredUserOp.preVerificationGas),
+        callGasLimit: toHex(sponsoredUserOp.callGasLimit),
         paymasterVerificationGasLimit: toHex(
-            op.paymasterVerificationGasLimit || 0
+            sponsoredUserOp.paymasterVerificationGasLimit || 0
         ),
-        paymasterPostOpGasLimit: toHex(op.paymasterPostOpGasLimit || 0),
-        verificationGasLimit: toHex(op.verificationGasLimit || 0),
+        paymasterPostOpGasLimit: toHex(
+            sponsoredUserOp.paymasterPostOpGasLimit || 0
+        ),
+        verificationGasLimit: toHex(sponsoredUserOp.verificationGasLimit || 0),
         ...(await getSignedPaymasterData({
             publicClient,
             signer: paymasterSigner,
-            userOp: userOperation,
+            userOp: sponsoredUserOp,
             paymaster,
             paymasterMode
         }))
@@ -152,9 +162,9 @@ const handleMethod = async ({
     parsedBody,
     paymasterSigner,
     publicClient,
-    bundler
+    bundlerClient
 }: {
-    bundler: BundlerClient
+    bundlerClient: BundlerClient
     paymasterSigner: WalletClient<Transport, Chain, Account>
     publicClient: PublicClient
     parsedBody: JsonRpcSchema
@@ -190,7 +200,7 @@ const handleMethod = async ({
             entryPoint,
             userOperation,
             paymasterMode: { mode: "verifying" },
-            bundler,
+            bundler: bundlerClient,
             paymaster: epToPaymaster[entryPoint],
             publicClient,
             paymasterSigner,
@@ -277,6 +287,15 @@ const handleMethod = async ({
         ]
     }
 
+    if (parsedBody.method === "pimlico_getUserOperationGasPrice") {
+        return await bundlerClient.request({
+            // @ts-ignore
+            method: "pimlico_getUserOperationGasPrice",
+            // @ts-ignore
+            params: []
+        })
+    }
+
     if (parsedBody.method === "pimlico_getTokenQuotes") {
         const params = pimlicoGetTokenQuotesSchema.safeParse(parsedBody.params)
 
@@ -325,15 +344,21 @@ const handleMethod = async ({
 }
 
 export const createRpcHandler = ({
-    bundler,
-    publicClient,
+    altoRpc,
+    anvilRpc,
     paymasterSigner
 }: {
-    bundler: BundlerClient
-    publicClient: PublicClient
+    altoRpc: string
+    anvilRpc: string
     paymasterSigner: WalletClient<Transport, Chain, Account>
 }) => {
     return async (request: FastifyRequest, _reply: FastifyReply) => {
+        const publicClient = await getPublicClient(anvilRpc)
+        const bundlerClient = createBundlerClient({
+            chain: await getChain(anvilRpc),
+            transport: http(altoRpc)
+        })
+
         const body = request.body
         const parsedBody = jsonRpcSchema.safeParse(body)
         if (!parsedBody.success) {
@@ -345,7 +370,7 @@ export const createRpcHandler = ({
 
         try {
             const result = await handleMethod({
-                bundler,
+                bundlerClient,
                 paymasterSigner,
                 parsedBody: parsedBody.data,
                 publicClient

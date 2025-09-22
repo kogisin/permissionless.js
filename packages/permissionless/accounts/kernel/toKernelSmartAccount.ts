@@ -224,9 +224,13 @@ const getDefaultAddresses = ({
 }
 
 export const getEcdsaRootIdentifierForKernelV3 = (
-    validatorAddress: Address
+    validatorAddress: Address,
+    eip7702 = false
 ) => {
-    return concatHex([VALIDATOR_TYPE.VALIDATOR, validatorAddress])
+    return concatHex([
+        eip7702 ? VALIDATOR_TYPE.EIP7702 : VALIDATOR_TYPE.VALIDATOR,
+        eip7702 ? "0x" : validatorAddress
+    ])
 }
 
 /**
@@ -415,7 +419,7 @@ export type ToKernelSmartAccountParameters<
           index?: never
           factoryAddress?: never
           metaFactoryAddress?: never
-          accountLogicAddress?: never
+          accountLogicAddress?: Address
           validatorAddress?: never
           nonceKey?: never
           useMetaFactory?: never
@@ -723,12 +727,23 @@ export async function toKernelSmartAccount<
             return this.signMessage({ message: hash })
         },
         async signMessage({ message }) {
+            if (
+                "isDeployed" in this &&
+                !(await (this as any).isDeployed()) &&
+                eip7702
+            ) {
+                throw new Error(
+                    "Kernel with EIP-7702 isn't 1271 compliant before delegation."
+                )
+            }
+
             const signature = await signMessage({
                 owner,
                 message,
                 accountAddress: await this.getAddress(),
                 kernelVersion: kernelVersion,
-                chainId: await getMemoizedChainId()
+                chainId: await getMemoizedChainId(),
+                eip7702: eip7702
             })
 
             if (isKernelV2(kernelVersion)) {
@@ -736,17 +751,28 @@ export async function toKernelSmartAccount<
             }
 
             return concatHex([
-                getEcdsaRootIdentifierForKernelV3(validatorAddress),
+                getEcdsaRootIdentifierForKernelV3(validatorAddress, eip7702),
                 signature
             ])
         },
         async signTypedData(typedData) {
+            if (
+                "isDeployed" in this &&
+                !(await (this as any).isDeployed()) &&
+                eip7702
+            ) {
+                throw new Error(
+                    "Kernel with EIP-7702 isn't 1271 compliant before delegation."
+                )
+            }
+
             const signature = await signTypedData({
                 owner: owner,
                 chainId: await getMemoizedChainId(),
                 ...(typedData as TypedDataDefinition),
                 accountAddress: await this.getAddress(),
-                kernelVersion: kernelVersion
+                kernelVersion: kernelVersion,
+                eip7702
             })
 
             if (isKernelV2(kernelVersion)) {
@@ -754,7 +780,7 @@ export async function toKernelSmartAccount<
             }
 
             return concatHex([
-                getEcdsaRootIdentifierForKernelV3(validatorAddress),
+                getEcdsaRootIdentifierForKernelV3(validatorAddress, eip7702),
                 signature
             ])
         },
@@ -780,7 +806,8 @@ export async function toKernelSmartAccount<
                       message: { raw: hash },
                       chainId,
                       accountAddress: await this.getAddress(),
-                      kernelVersion
+                      kernelVersion,
+                      eip7702: false
                   })
                 : await owner.signMessage({
                       message: { raw: hash }
